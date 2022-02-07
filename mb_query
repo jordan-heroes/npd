@@ -1,0 +1,42 @@
+import pandas_gbq
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+
+
+def product_download():
+    project_id = 'analytics-298917'
+    sql = """
+    SELECT `analytics_viz.dim_products_catalogue`.`asin` AS `asin`, `analytics_viz.dim_products_catalogue`.`status` AS `status`, `analytics_viz.dim_products_catalogue`.`amz_item_height` AS `amz_item_height`, `analytics_viz.dim_products_catalogue`.`amz_item_height_unit` AS `amz_item_height_unit`, `analytics_viz.dim_products_catalogue`.`amz_item_length` AS `amz_item_length`, `analytics_viz.dim_products_catalogue`.`amz_item_length_unit` AS `amz_item_length_unit`, `analytics_viz.dim_products_catalogue`.`amz_item_width` AS `amz_item_width`, `analytics_viz.dim_products_catalogue`.`amz_item_width_unit` AS `amz_item_width_unit`, `analytics_viz.dim_products_catalogue`.`amz_item_weight` AS `amz_item_weight`, `analytics_viz.dim_products_catalogue`.`amz_item_weight_unit` AS `amz_item_weight_unit`, `analytics_viz.dim_products_catalogue`.`amz_package_height` AS `amz_package_height`, `analytics_viz.dim_products_catalogue`.`amz_package_height_unit` AS `amz_package_height_unit`, `analytics_viz.dim_products_catalogue`.`amz_package_length` AS `amz_package_length`, `analytics_viz.dim_products_catalogue`.`amz_package_length_unit` AS `amz_package_length_unit`, `analytics_viz.dim_products_catalogue`.`amz_package_width` AS `amz_package_width`, `analytics_viz.dim_products_catalogue`.`amz_package_width_unit` AS `amz_package_width_unit`, `analytics_viz.dim_products_catalogue`.`amz_package_weight` AS `amz_package_weight`, `analytics_viz.dim_products_catalogue`.`amz_package_weight_unit` AS `amz_package_weight_unit`, `analytics_viz.dim_products_catalogue`.`unit_cost_currency` AS `unit_cost_currency`, `analytics_viz.dim_products_catalogue`.`unit_cost_local` AS `unit_cost_local`, `analytics_viz.dim_products_catalogue`.`duty_percentage_eu` AS `duty_percentage_eu`, `analytics_viz.dim_products_catalogue`.`duty_percentage_us` AS `duty_percentage_us`, `analytics_viz.dim_products_catalogue`.`duty_percentage_uk` AS `duty_percentage_uk`, `analytics_viz.dim_products_catalogue`.`duty_percentage_ca` AS `duty_percentage_ca`, `analytics_viz.dim_products_catalogue`.`duty_percentage_jp` AS `duty_percentage_jp`, `analytics_viz.dim_products_catalogue`.`duty_percentage_au` AS `duty_percentage_au`, `analytics_viz.dim_products_catalogue`.`moq` AS `moq`, `analytics_viz.dim_products_catalogue`.`production_lead_time` AS `production_lead_time`
+    FROM `analytics_viz.dim_products_catalogue`
+    WHERE `analytics_viz.dim_products_catalogue`.`status` = 'Active'
+    LIMIT 1048575"""
+    df = pandas_gbq.read_gbq(sql, project_id=project_id,progress_bar_type='tqdm')
+    return df
+
+def product_seasonality(asin):
+    project_id = 'analytics-298917'
+    sql = """
+    SELECT extract(month from `analytics_viz.f_amz_profit_and_loss`.`dt`) AS `dt`, `analytics_viz.f_amz_profit_and_loss`.`asin` AS `asin`, sum(`analytics_viz.f_amz_profit_and_loss`.`pre_refund_gmv`) AS `sum`
+    FROM `analytics_viz.f_amz_profit_and_loss`
+    WHERE (`analytics_viz.f_amz_profit_and_loss`.`dt` >= date_trunc(date_add(current_date(), INTERVAL -365 day), day)
+    AND `analytics_viz.f_amz_profit_and_loss`.`dt` < date_trunc(current_date(), day))
+    GROUP BY `dt`, `asin`
+    ORDER BY `dt` ASC, `asin` ASC"""
+    df = pandas_gbq.read_gbq(sql, project_id=project_id,progress_bar_type='tqdm')
+    return df
+
+def currency_rates():
+    project_id = 'analytics-298917'
+    sql = """
+    SELECT `analytics_viz.dim_currency_exchange_daily`.`from_currency_code` AS `from_currency_code`, `analytics_viz.dim_currency_exchange_daily`.`to_currency_code` AS `to_currency_code`, avg(`analytics_viz.dim_currency_exchange_daily`.`fx`) AS `avg`
+    FROM `analytics_viz.dim_currency_exchange_daily`
+    WHERE (`analytics_viz.dim_currency_exchange_daily`.`dt` >= date_trunc(date_add(current_date(), INTERVAL -14 day), day)
+    AND `analytics_viz.dim_currency_exchange_daily`.`dt` < date_trunc(current_date(), day))
+    GROUP BY `from_currency_code`, `to_currency_code`
+    ORDER BY `from_currency_code` ASC, `to_currency_code` ASC
+    """
+    df = pandas_gbq.read_gbq(sql, project_id=project_id,progress_bar_type='tqdm')
+    df = df[df['from_currency_code'] == 'GBP']
+    return df
