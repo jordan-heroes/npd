@@ -1,14 +1,12 @@
+from calendar import day_abbr
+import streamlit as st
 import pandas as pd
 import matplotlib
 import numpy as np
-
 from datetime import datetime
 import mb_query
+from st_aggrid import AgGrid
 
-pd.set_option('display.max_rows', 500)
-pd.set_option('display.max_columns', 500)
-pd.set_option('display.width', 1000)
-pd.options.display.float_format = '{:.2f}'.format
 
 def h10_xray(filepath_of_csv):
     df = pd.read_csv(filepath_of_csv)
@@ -45,24 +43,24 @@ def months():
     x = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
     return x
 
-def exponenter(count):
+def exponenter(count,len_sheet):
     #works out the curve of search results based on ranking
-    if count > 50:
+    if count/len_sheet > 0.8:
         exponent = -2.5
-    elif count > 40:
+    elif count/len_sheet > 0.6:
         exponent = -2
-    elif count >30:
+    elif count/len_sheet > 0.4:
         exponent = -1.5
     elif count >20:
-        exponent= -1
+        exponent= -1.1
     elif count > 10:
-        exponent = -0.9
+        exponent = -0.95
     elif count >5:
-        exponent = -0.8
+        exponent = -0.85
     elif count >3:
-        exponent = -0.7
+        exponent = -0.75
     elif count >=1:
-        exponent = -0.6
+        exponent = -0.65
     return exponent
 
 def full_year_generation(df_in):
@@ -328,11 +326,11 @@ def demand_planning(df_in,sspa_budget):
         if index != 0:
             last_month = y.loc[index-1,'Organic Search Units']+y.loc[index-1,'SSPA Units']+y.loc[index-1,'Other GV Units']
             count =1
-            last_month_sales = df_in['Sales']
+            last_month_sales = (df_in['Sales']*12)*s_curve[int(y.loc[index,'Full Date'].month)-2]
             for x in last_month_sales:
                 if x > last_month:
                     count = count +1
-            exponent = exponenter(count)
+            exponent = exponenter(count,len(last_month_sales))
             y.loc[index,'Category Rank'] = count
             y.loc[index,'Organic Search GVs'] = (0.25*y.loc[index,'Total Organic Search GVs'])*(count**exponent)
             y.loc[index,'Organic Search Units'] = round(y.loc[index,'Organic Search GVs']*y.loc[index,'Conversion'],0)
@@ -398,13 +396,13 @@ def local_currency_pnl_builder(demand_sheet,sspa_budget,marketplace):
     y['Product Cost'] = product_cost*y['Units']
     y['Cost of Capital per Unit'] = cost_of_capital
     y['Cost of Capital'] = cost_of_capital*y['Units']
-    y['Landed Cost per Unit'] = freight_per_unit+import_duty+fba_prep+fba_delivery+product_cost+cost_of_capital
-    y['Landed Cost'] = (freight_per_unit+import_duty+fba_prep+fba_delivery+product_cost+cost_of_capital)*y['Units']
+    y['Landed Cost per Unit'] = freight_per_unit+import_duty+fba_prep+fba_delivery+product_cost
+    y['Landed Cost'] = (freight_per_unit+import_duty+fba_prep+fba_delivery+product_cost)*y['Units']
     y['PC1'] = y['Revenue ex VAT']-y['Landed Cost']
     y['PC1%'] = y['PC1']/y['Revenue ex VAT']
     y['Shipment Cost per Unit'] = amazon_holding_and_shipment_costs(marketplace) #placeholder
     y['Shipment Cost'] = y['Shipment Cost per Unit']*y['Units']
-    y['Holding Cost per Unit'] = 0.25 #PLACEHOLDER - CAN WORK THIS OUT OFF VOLUME OF PACKAGE LATER
+    y['Holding Cost per Unit'] = 0.5 #PLACEHOLDER - CAN WORK THIS OUT OFF VOLUME OF PACKAGE LATER
     y['Holding Cost'] = y['Holding Cost per Unit']*y['Units']
     y['PC2'] = y['PC1']-(y['Shipment Cost']+y['Holding Cost'])
     y['PC2%'] = y['PC2']/y['Revenue ex VAT']
@@ -415,7 +413,7 @@ def local_currency_pnl_builder(demand_sheet,sspa_budget,marketplace):
 
 def amazon_holding_and_shipment_costs(marketplace):
     #super placeholder function - DATA IS IN NO WAY ACCURATE
-    y = 3
+    y = 3.5
     return y
 
 def gbp_pnl(df_in,marketplace):
@@ -436,7 +434,34 @@ def initial_order_value(df_in,mp):
     launch_units = demand['Units'].iloc[1:lead_time+2].sum()
     return launch_units
 
-#get dimensions and turn into cm where needed 
+@st.cache
+def get_product_info_cache():
+    product_info = mb_query.product_download()
+    return product_info
+@st.cache
+def exchange_rate_query_cache():
+    exchange_rate_query = mb_query.currency_rates()
+    return exchange_rate_query
+
+product_info = get_product_info_cache()
+exchange_rate_query = exchange_rate_query_cache()
+us_exchange_rate = exchange_rate_query[exchange_rate_query['to_currency_code'] == 'USD']['avg'].values[0]
+eur_exchange_rate = exchange_rate_query[exchange_rate_query['to_currency_code'] == 'EUR']['avg'].values[0]
+
+@st.cache
+def product_costs(asin):
+    local_cost = product_info[product_info['asin']== asin]['unit_cost_local'].values[0]
+    cost_currency = product_info[product_info['asin']== asin]['unit_cost_currency'].values[0]
+    if cost_currency =='USD':
+        x = local_cost/us_exchange_rate
+    if cost_currency =='EUR':
+        x = local_cost/eur_exchange_rate
+    if cost_currency =='GBP':
+        x = local_cost
+    if cost_currency =='AUD':
+        x = local_cost*(0.53)#can't work out how to link AUD, only impacts 1 SKU
+    return x
+@st.cache
 def package_dimensions(asin):
     package_height = product_info[product_info['asin']== asin]['amz_package_height'].values[0]
     package_height_unit = product_info[product_info['asin']== asin]['amz_package_height_unit'].values[0]
@@ -457,112 +482,135 @@ def package_dimensions(asin):
         package_weight = float(package_weight)*float(0.453592)
     return [package_height,package_width,package_length,package_weight]
 
+@st.cache
 def duty_costs(asin):
     uk_duty = product_info[product_info['asin']== asin]['duty_percentage_uk'].values[0]
     us_duty = product_info[product_info['asin']== asin]['duty_percentage_us'].values[0]
     eu_duty = product_info[product_info['asin']== asin]['duty_percentage_eu'].values[0]
     return [uk_duty, us_duty,eu_duty]
 
-def product_costs(asin):
-    local_cost = product_info[product_info['asin']== asin]['unit_cost_local'].values[0]
-    cost_currency = product_info[product_info['asin']== asin]['unit_cost_currency'].values[0]
-    if cost_currency =='USD':
-        x = local_cost/us_exchange_rate
-    if cost_currency =='EUR':
-        x = local_cost/eur_exchange_rate
-    if cost_currency =='GBP':
-        x = local_cost
-    if cost_currency =='AUD':
-        x = local_cost*(0.53)#can't work out how to link AUD, only impacts 1 SKU
-    return x
+pd.set_option('display.max_rows', 500)
+pd.set_option('display.max_columns', 500)
+pd.set_option('display.width', 1000)
+pd.options.display.float_format = '{:.2f}'.format
 
-def seasonality_curve(asin):
+st.title("New Product Development Analyser")
+st.subheader("Select the ASIN")
+asin_input = st.text_input("Baseline ASIN")
+if asin_input is not None:
+    asin = asin_input
+    marketplace_input = st.radio(label = "Region",options = ("US","UK","EU"))
+    marketplace = marketplace_input
+    production_lead_time_months = np.ceil((product_info[product_info['asin']== asin]['production_lead_time'].values[0])/30)
+    if np.isnan(production_lead_time_months) == True:
+        production_lead_time_months = 3
+    else:
+        production_lead_time_months=production_lead_time_months
+    shipment_lead_time_months = 3
+    product_cost_gbp = product_costs(asin)
+    product_cost_gbp = float(st.text_input(label = "Product Cost (GBP)",value = round(product_cost_gbp,2)))
+    st.subheader("Product Dimensions")
+    col1, col2, col3, col4 = st.columns(4)
+    product_height = float(col1.text_input(label = "Product Height (m)", value = round(package_dimensions(asin)[0],2)))
+    product_width = float(col2.text_input(label = "Product Width (m)", value = round(package_dimensions(asin)[1],2)))
+    product_depth = float(col3.text_input(label = "Product Length (m)", value = round(package_dimensions(asin)[2],2)))
+    unit_weight = float(col4.text_input(label = "Product Weight (kg)", value = round(package_dimensions(asin)[3],2)))
+    #column set for leadtime adjustments
+    st.subheader("Production Lead Time")
+    col5,col6 = st.columns(2)
+    production_lead_time_months = int(col5.text_input(label = "Production Lead Time (Months)",value = int(production_lead_time_months)))
+    shipment_lead_time_months= int(col6.text_input(label = "Shipping Lead Time (Months)", value = shipment_lead_time_months))
+    lead_time = (int(production_lead_time_months)+int(shipment_lead_time_months))
+    launch_month = datetime.strptime(str(int((datetime.now().month-1+shipment_lead_time_months+production_lead_time_months))),"%m").strftime("%b")
+    #display leadtime
+    st.subheader("Shipping Methods")
+    sea_percent = st.slider(label = "Sea %",min_value =0.0,max_value=1.0,step=0.01,value = 1.0)
+    air_percent = 1-sea_percent
+    colsea,colair = st.columns(2)
+    colsea.metric(label = "Sea %", value = round(sea_percent*100,0))
+    colair.metric(label = "Air %", value = round(air_percent*100,0))
+    st.metric (label = "Launch Month", value = launch_month)
+    launch_year = 2022
+    
+
+    #dump in all the other ASIN dependencies
+    duties = duty_costs(asin)
+    product_cost_usd = product_cost_gbp*us_exchange_rate
+    product_cost_eur = product_cost_gbp*eur_exchange_rate
+    import_duty_us = duties[1]
+    import_duty_uk = duties[0]
+    import_duty_eu = duties[2]
+    if np.isnan(import_duty_eu) == True:
+        import_duty_eu = 0.0
+    else:
+        import_duty_eu=import_duty_eu
+    if np.isnan(import_duty_us) == True:
+        import_duty_us = 0.0
+    else:
+        import_duty_us=import_duty_us
+    if np.isnan(import_duty_uk) == True:
+        import_duty_uk = 0.0
+    else:
+        import_duty_uk=import_duty_uk
+
+
+    #flattable of shipping costs
+    #shipping costs (need to link to a query used by Kieran at some point)
+    shipment_model = 'Bear'
+    shipment_container ='40'
+    twenty_foot_us = [4000,7500,11000]
+    twenty_foot_uk = [4000,10000,11000]
+    twenty_foot_eu = [3500,7000,10000]
+    forty_foot_us = [5000,11500,16000]
+    forty_foot_uk = [7500,14500,20500]
+    forty_foot_eu = [6500,12500,18500]
+    forty_foot_high_cube_us = [6000,12000,17000]
+    forty_foot_high_cube_uk = [8000,15000,21000]
+    forty_foot_high_cube_eu = [7000,13000,19000]
+    air_us = [8,10,12]
+    air_uk = [7,9,11]
+    air_eu = [7,8,10]
+
+    #assumptions - probably don't want to surface to the user
+    organic_search_percent = 0.5
+    sspa_percent = 0.2
+    other_gv_percent = 1-(organic_search_percent+sspa_percent)
+    st.subheader("Marketing Costs")
+    col8,col9 = st.columns(2)
+    sspa_cpc = float(col8.text_input(label = "Sponsored Products CPC (Local Currency", value =1))
+    conversion_percent = float(col9.text_input(label = 'Glance View Conversion% (0-1)', value = 0.1))
+
+
+st.subheader("Input Cleaned CSV below")
+data_in = st.file_uploader("Choose a File")
+if data_in is not None:
+    input_df = h10_xray(data_in)
+    st.write(input_df)
+
+st.subheader("Product Seasonality")
+@st.cache
+def seasonality_curve(asin_in):
     x = mb_query.product_seasonality('h')
-    q = asin
+    q = asin_in
     try:
         input_asins = str(q).split(',')
     except:
         input_asins = asin
     x = x[x['asin'].isin(input_asins)]
     x.reset_index(inplace=True,drop=True)
-    x['revenuepercent'] = x['sum']/x['sum'].sum()
-    x['revenue percent smoothed'] = x['revenuepercent'].rolling(window=3,min_periods=1, center=True).sum()
-    x['revenue percent smoothed'] = x['revenue percent smoothed']/x['revenue percent smoothed'].sum()
-    return x['revenue percent smoothed'].to_list()
+    x['revenue percent'] = x['sum']/x['sum'].sum()
+    return x
 
-
-asin = "B01FCMV5RM"
-
-product_info = mb_query.product_download()
-exchange_rate_query = mb_query.currency_rates()
-us_exchange_rate = exchange_rate_query[exchange_rate_query['to_currency_code'] == 'USD']['avg'].values[0]
-eur_exchange_rate = exchange_rate_query[exchange_rate_query['to_currency_code'] == 'EUR']['avg'].values[0]
-product_cost_gbp = product_costs(asin)
-product_cost_usd = product_cost_gbp*us_exchange_rate
-product_cost_eur = product_cost_gbp*eur_exchange_rate
-
-#global variables - ideally want these to be user defined at some point (or to be honest defined with data so it's automatic)
-s_curve = [0.083,0.083,0.083,0.083,0.083,0.083,0.083,0.083,0.083,0.083,0.083,0.083]
+s_curve_df = seasonality_curve(asin)
+s_curve_df.rename(columns = {'dt':'month'},inplace=True)
+s_curve_df = s_curve_df.drop(['asin','sum'],axis=1)
+grid_return = AgGrid(s_curve_df.round(2), editable=True)
+temp_s_curve_df = grid_return['data']
+s_curve = temp_s_curve_df['revenue percent'].tolist()
+st.metric(label = "Percent (Should add to 1)",value =sum(s_curve))
 price_discount_curve =[0,0,0,0,0,0,0,0,0,0,0,0]
 
-
-
-#Freight Inputs - From user
-sea_percent = 1
-air_percent = 1-sea_percent
-production_lead_time_months = np.ceil((product_info[product_info['asin']== asin]['production_lead_time'].values[0])/30)
-shipment_lead_time_months = 3
-lead_time = (int(production_lead_time_months)+int(shipment_lead_time_months))
-launch_month = datetime.strptime(str(int((datetime.now().month-1+shipment_lead_time_months+production_lead_time_months))),"%m").strftime("%b")
-
-print(production_lead_time_months,shipment_lead_time_months,launch_month)
-launch_year = 2022
-
-
-#ads cpc (local currency)
-sspa_cpc = 1
-
-#Marketplace - From User
-marketplace = 'US'
-
-#can be pulled from query
-dimensions_list = package_dimensions(asin)
-product_height = dimensions_list[0]
-product_width = dimensions_list[1]
-product_depth = dimensions_list[2]
-unit_weight = dimensions_list[3]
-
-
-#ideally need a query
-duties = duty_costs(asin)
-import_duty_us = duties[1]
-import_duty_uk = duties[0]
-import_duty_eu = duties[2]
-
-#shipping costs (need to link to a query used by Kieran at some point)
-shipment_model = 'Bear'
-shipment_container ='40'
-twenty_foot_us = [4000,7500,11000]
-twenty_foot_uk = [4000,10000,11000]
-twenty_foot_eu = [3500,7000,10000]
-forty_foot_us = [5000,11500,16000]
-forty_foot_uk = [7500,14500,20500]
-forty_foot_eu = [6500,12500,18500]
-forty_foot_high_cube_us = [6000,12000,17000]
-forty_foot_high_cube_uk = [8000,15000,21000]
-forty_foot_high_cube_eu = [7000,13000,19000]
-air_us = [8,10,12]
-air_uk = [7,9,11]
-air_eu = [7,8,10]
-
-#assumptions - probably don't want to surface to the user
-organic_search_percent = 0.5
-sspa_percent = 0.2
-other_gv_percent = 1-(organic_search_percent+sspa_percent)
-conversion_percent = 0.07
-
-
-
+@st.cache
 def dumb_maximise(df_in):
     ppc=[]
     pc3 = []
@@ -571,21 +619,95 @@ def dumb_maximise(df_in):
         pc3.append(x['PC3'].iloc[1:13].sum())
         ppc.append(i)
     suggestions = tuple(zip(ppc,pc3))
-    return max(suggestions,key=lambda item:item[1])[0]
+    return suggestions
+
+sspa_calc = dumb_maximise(input_df)
+
+sspa_budget = max(sspa_calc,key=lambda item:item[1])[0]
+
+st.subheader("SSPA Budget")
+if data_in is not None:
+    st.metric(label = "Sponsored Ads Budget (per Month)", value = sspa_budget)
+    sspa_plot_data = pd.DataFrame(sspa_calc, columns = ['PPC','PC3'])
+    st.bar_chart(sspa_plot_data)
+
+st.subheader("Full Year Sizing")
+if data_in is not None:
+    full_year_sizing = full_year_generation(input_df)
+    full_year_sizing = full_year_sizing.round(2)
+    st.write(full_year_sizing)
+
+st.subheader("Demand Planning")
+if data_in is not None:
+    demand_planning_info = demand_planning(input_df,sspa_budget)
+    st.dataframe(demand_planning_info)
+st.subheader("Local Currency PNL")
+if data_in is not None:
+    local_currency_pnl_output = local_currency_pnl_builder(input_df,sspa_budget,marketplace)
+    st.write(local_currency_pnl_output)
+
+st.subheader("GBP PNL")
+if data_in is not None:
+    gbp_pnl_output = gbp_pnl(input_df,marketplace)
+    st.write(gbp_pnl_output)
+
+st.subheader ("Initial Order Quantities")
+if data_in is not None:
+    initial_order_quantities = initial_order_value(input_df,marketplace)
+    st.write(initial_order_quantities)
 
 
 
+if marketplace == 'US':
+    st.markdown ("Initial PO: " + str(initial_order_quantities)+' Units, to cover ' + str(lead_time+1) + ' months of demand (' +str(lead_time)+
+        ' months lead time). This is a landed cost (including cost of capital) of $' + 
+        str(int(initial_order_quantities*local_currency_pnl_output['Landed Cost per Unit'].values[0])) +' (£' + str(int(initial_order_quantities*gbp_pnl_output['Landed Cost per Unit'].values[0]))+' GBP)')
+    st.markdown ("Initial PPC Spend: $" + str(local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())+ ' (£' + str(int(gbp_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum()))+
+        ' GBP), at a $' + str(sspa_cpc) + '/£' + str(round((sspa_cpc/us_exchange_rate),2))+ ' CPC, to cover ' +str(lead_time+1)+ 
+        ' months of demand (initial order months of quantity), in line with CPCs we have seen in the category. This would drive us to rank '+
+        str(gbp_pnl_output['Category Rank'].iloc[lead_time+1])+ ' in the launch period')
+    st.markdown("Launch Price: $" + str(round(local_currency_pnl_output['ASP'].iloc[1],2))+' (£' +str(round(gbp_pnl_output['ASP'].iloc[1],2))+') -20% to category ASP, continuity price of $' + str(round(local_currency_pnl_output['ASP'].iloc[6],2)) + ' (£' + str(round(gbp_pnl_output['ASP'].iloc[6],2))
+        +'), in line with category ASP')
+    st.markdown("Total Launch Cost: $" + str(int((initial_order_quantities*local_currency_pnl_output['Landed Cost per Unit'].values[0]) + local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())) + 
+        ' (£'+ str(int((initial_order_quantities*gbp_pnl_output['Landed Cost per Unit'].values[0]) + gbp_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum()))+')')
+    st.markdown("FYE: Revenue $" + str(int(round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2))) + ' (£' + str(int(round(gbp_pnl_output['Revenue'].iloc[1:13].sum(),-2)))+'), $'
+        + str(int(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)))+' PC3 (£' + str(int(round(gbp_pnl_output['PC3'].iloc[1:13].sum(),-2)))+')' +
+        ' FYE PC3 Margin of ' + str(round(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)/round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2)*100,1))+'%. PC3 after launch is ' + str(round(local_currency_pnl_output['PC3%'].iloc[8]*100,1)) +'%')
+    st.markdown("Payback Period: " +str(local_currency_pnl_output[local_currency_pnl_output.PC3 > 0].index[0]-1)+' months')
+    st.markdown("ASIN for rework if needed: " +str(asin))
+    st.markdown('Working assumptions: Cost (USD): ' + str(round(product_cost_usd,2)) + ', CPC (local currency): ' + str(sspa_cpc) + ', Shipping Cost (Local): '+ str(amazon_holding_and_shipment_costs(marketplace)))
+elif marketplace == 'EU':
+    st.markdown ("Initial PO: " + str(initial_order_quantities)+' Units, to cover ' + str(lead_time+1) + ' months of demand (' +str(lead_time)+
+        ' months lead time). This is a landed cost (including cost of capital) of €' + 
+        str(int(initial_order_quantities*local_currency_pnl_output['Landed Cost per Unit'].values[0])) +' (£' + str(int(initial_order_quantities*gbp_pnl_output['Landed Cost per Unit'].values[0]))+' GBP)')
+    st.markdown ("Initial PPC Spend: €" + str(local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())+ ' (£' + str(int(gbp_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum()))+
+        ' GBP), at a €' + str(sspa_cpc) + '/£' + str(round((sspa_cpc/eur_exchange_rate),2))+ ' CPC, to cover ' +str(lead_time+1)+ 
+        ' months of demand (initial order months of quantity), in line with CPCs we have seen in the category. This would drive us to rank '+
+        str(gbp_pnl_output['Category Rank'].iloc[lead_time+1])+ ' in the launch period')
+    st.markdown("Launch Price: €" + str(round(local_currency_pnl_output['ASP'].iloc[1],2))+' (£' +str(round(gbp_pnl_output['ASP'].iloc[1],2))+') -20% to category ASP, continuity price of €' + str(round(local_currency_pnl_output['ASP'].iloc[6],2)) + ' (£' + str(round(gbp_pnl_output['ASP'].iloc[6],2))
+        +'), in line with category ASP')
+    st.markdown("Total Launch Cost: €" + str(int((initial_order_quantities*local_currency_pnl_output['Landed Cost per Unit'].values[0]) + local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())) + 
+        ' (£'+ str(int((initial_order_quantities*gbp_pnl_output['Landed Cost per Unit'].values[0]) + gbp_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum()))+')')
+    st.markdown("FYE: Revenue €" + str(int(round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2))) + ' (£' + str(int(round(gbp_pnl_output['Revenue'].iloc[1:13].sum(),-2)))+'), $'
+        + str(int(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)))+' PC3 (£' + str(int(round(gbp_pnl_output['PC3'].iloc[1:13].sum(),-2)))+')' +
+        ' FYE PC3 Margin of ' + str(round(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)/round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2)*100,1))+'%. PC3 after launch is ' + str(round(local_currency_pnl_output['PC3%'].iloc[8]*100,1)) +'%')
+    st.markdown("Payback Period: " +str(local_currency_pnl_output[local_currency_pnl_output.PC3 > 0].index[0]-1)+' months')
+    st.markdown("ASIN for rework if needed: " +str(asin))
+    st.markdown('Working assumptions: Cost (USD): ' + str(round(product_cost_usd,2)) + ', CPC (local currency): ' + str(sspa_cpc) + ', Shipping Cost (Local): '+ str(amazon_holding_and_shipment_costs(marketplace)))
+elif marketplace =='UK':
+    st.markdown ("Initial PO: " + str(initial_order_quantities)+' Units, to cover ' + str(lead_time+1) + ' months of demand (' +str(lead_time)+
+        ' months lead time). This is a landed cost (including cost of capital) of £' + str(int(initial_order_quantities*gbp_pnl_output['Landed Cost per Unit'].values[0])))
+    st.markdown ("Initial PPC Spend: £" + str(local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())+ 
+        ' /£' + str(round((sspa_cpc),2))+ ' CPC, to cover ' +str(lead_time+1)+ 
+        ' months of demand (initial order months of quantity), in line with CPCs we have seen in the category. This would drive us to rank '+
+        str(gbp_pnl_output['Category Rank'].iloc[lead_time+1])+ ' in the launch period')
+    st.markdown("Launch Price: £" +str(round(gbp_pnl_output['ASP'].iloc[1],2))+' -20% to category ASP, continuity price of £' + str(round(local_currency_pnl_output['ASP'].iloc[6],2)) +' in line with category ASP')
+    st.markdown("Total Launch Cost: £" + str(int((initial_order_quantities*local_currency_pnl_output['Landed Cost per Unit'].values[0]) + local_currency_pnl_output['SSPA Budget'].iloc[1:lead_time+1].sum())))
+    st.markdown("FYE: Revenue £" + str(int(round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2))) + ', £' +str(int(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)))+
+        ' (FYE PC3 Margin of ' + str(round(round(local_currency_pnl_output['PC3'].iloc[1:13].sum(),-2)/round(local_currency_pnl_output['Revenue'].iloc[1:13].sum(),-2)*100,1))+'%). PC3 after launch period is ' + str(round(local_currency_pnl_output['PC3%'].iloc[8]*100,1)) +'%')
+    st.markdown("Payback Period: " +str(local_currency_pnl_output[local_currency_pnl_output.PC3 > 0].index[0]-1)+' months')
+    st.markdown("ASIN for rework if needed: " +str(asin))
+    st.markdown('Working assumptions: Cost (USD): ' + str(round(product_cost_usd,2)) + ', CPC (local currency): ' + str(sspa_cpc) + ', Shipping Cost (Local): '+ str(amazon_holding_and_shipment_costs(marketplace)))
+    
 
 
-es = h10_xray(r"C:\Users\jorda\Downloads\Helium_10_Xray_2022-02-07 (2).csv")
-
-sspa_budget = dumb_maximise(es)
-
-top_asin_full_year(es)
-x = cost_calculation(shipment_model,shipment_container)
-y = demand_planning(es,sspa_budget)
-p = initial_order_value(es,marketplace)
-z = local_currency_pnl_builder(es,sspa_budget,marketplace)
-a = gbp_pnl(es,marketplace)
-q = full_year_generation(es)
-print(s_curve)
